@@ -1,4 +1,3 @@
-# DNQ.py
 import random
 import numpy as np
 import torch
@@ -6,19 +5,25 @@ import torch.nn as nn
 import torch.optim as optim
 from collections import deque
 import matplotlib.pyplot as plt
-import time
 from matplotlib import colors
+from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
 
 GRID_ROWS = 8           # 网格行数
 GRID_COLS = 8           # 网格列数
 NUM_AGENTS = 4          # 智能体个数
-NUM_EPISODES = 200      # 训练轮数
+NUM_EPISODES = 300      # 训练轮数
 
 # ----------------------------------------
-# 第一部分：定义 TrafficRoutingEnv 环境
+# 第一部分：定义 TrafficRoutingEnv 环境（加入固定障碍物）
 # ----------------------------------------
 class TrafficRoutingEnv:
-    def __init__(self, grid_size=(5, 5), num_agents=2):
+    def __init__(self, grid_size=(5, 5), num_agents=2, obstacles=None):
+        """
+        新增参数：
+            obstacles: List of (row, col) 坐标，表示固定不可通过的障碍物。
+                       如果为 None，则默认没有障碍物。
+        """
         # 设置随机种子，确保可复现
         random.seed(41)
         np.random.seed(41)
@@ -47,10 +52,24 @@ class TrafficRoutingEnv:
         self._arrived = {i: False for i in range(self.num_agents)}
         self.steps = 0
 
+        # ⑤ 初始化障碍物列表
+        if obstacles is None:
+            self.obstacles = []  # 没有障碍物
+        else:
+            self.obstacles = obstacles.copy()
+
+        # 确保障碍物不会与初始位置或目的地冲突
+        for obs in self.obstacles:
+            for i in range(self.num_agents):
+                if obs == self._initial_positions[i]:
+                    raise ValueError(f"障碍物 {obs} 与 Agent {i} 的初始位置冲突！")
+                if obs == self.destinations[i]:
+                    raise ValueError(f"障碍物 {obs} 与 Agent {i} 的目的地冲突！")
+
     def reset(self):
         """
         不再随机生成位置，而是把 agent_positions 还原为构造时那套 _initial_positions，
-        并把 arrived、steps 清零。目的地 self.destinations 保持不变。
+        并把 arrived、steps 清零。目的地 self.destinations 和 self.obstacles 保持不变。
         """
         # 1) 把 agent_locations 复位到构造里存的那份
         self.agent_positions = dict(self._initial_positions)
@@ -63,12 +82,14 @@ class TrafficRoutingEnv:
         return self._get_observations()
 
     def _get_observations(self):
-        # 返回每个智能体的当前位置和目标位置
+        # 返回每个智能体的当前位置、目标位置，以及障碍物列表（如需将障碍物信息纳入 observation）
         obs = {}
         for i in range(self.num_agents):
             obs[i] = {
                 'position': self.agent_positions[i],
-                'destination': self.destinations[i]
+                'destination': self.destinations[i],
+                # 如果后续算法需要知道分布式障碍，可在 observation 中加入：
+                'obstacles': self.obstacles
             }
         return obs
 
@@ -76,7 +97,7 @@ class TrafficRoutingEnv:
         # 1. 记录旧位置
         old_positions = {i: self.agent_positions[i] for i in range(self.num_agents)}
 
-        # 2. 计算“期望”新位置（含已到达冻结逻辑）
+        # 2. 计算“期望”新位置（含已到达冻结逻辑 + 障碍物阻塞逻辑）
         new_positions = {}
         for i, action in actions.items():
             if self._arrived.get(i, False):
@@ -84,15 +105,21 @@ class TrafficRoutingEnv:
                 continue
 
             x, y = old_positions[i]
-            if action == 0 and x > 0:
+            if action == 0 and x > 0:                  # 上
                 x -= 1
-            elif action == 1 and x < self.grid_size[0] - 1:
+            elif action == 1 and x < self.grid_size[0] - 1:  # 下
                 x += 1
-            elif action == 2 and y > 0:
+            elif action == 2 and y > 0:                # 左
                 y -= 1
-            elif action == 3 and y < self.grid_size[1] - 1:
+            elif action == 3 and y < self.grid_size[1] - 1:  # 右
                 y += 1
-            new_positions[i] = (x, y)
+            # action == 4 (停留) 或越界时，x,y 保持不变
+
+            # 如果“期望”新位置是障碍物，则保持在原地
+            if (x, y) in self.obstacles:
+                new_positions[i] = old_positions[i]
+            else:
+                new_positions[i] = (x, y)
 
         # 3. 检测并标记“交换碰撞”
         swap_blocked = set()
@@ -170,19 +197,36 @@ class TrafficRoutingEnv:
         return self._get_observations(), shaped_rewards, done, {}
 
     def render(self):
-        # 可视化网格、智能体和目标
+        # 可视化网格、障碍物、智能体和目标
+        H, W = self.grid_size
+        grid = np.zeros((H, W), dtype=int)
 
-        grid = np.zeros(self.grid_size)
-        cmap = colors.ListedColormap(['white', 'blue', 'red'])
-        bounds = [0, 1, 2, 3]
-        norm = colors.BoundaryNorm(bounds, cmap.N)
+        # 0 表示空白
+        # 1 表示目标（蓝色）
+        # 2 表示智能体（红色）
+        # 3 表示障碍物（黑色）
+        for (ox, oy) in self.obstacles:
+            grid[ox, oy] = 3
 
         for i in range(self.num_agents):
             x, y = self.destinations[i]
+            # 如果目的地恰好在障碍物上，根据需求可抛出错误或忽略。此处假设不冲突：
+            if grid[x, y] == 3:
+                raise ValueError(f"目的地 {(x, y)} 与障碍物冲突！")
             grid[x, y] = 1  # 目标标蓝色
+
         for i in range(self.num_agents):
             x, y = self.agent_positions[i]
+            # 如果智能体恰好踩在障碍物上，说明逻辑有问题，此处抛出错误以便调试
+            if grid[x, y] == 3:
+                raise ValueError(f"Agent {i} 企图进入障碍物 {(x, y)}！")
+            # 如果目的地和智能体重叠，根据优先级，智能体覆盖目标
             grid[x, y] = 2  # 智能体标红色
+
+        # 定义带四种颜色的 colormap
+        cmap = colors.ListedColormap(['white', 'blue', 'red', 'black'])
+        bounds = [0, 1, 2, 3, 4]
+        norm = colors.BoundaryNorm(bounds, cmap.N)
 
         plt.figure(figsize=(5, 5))
         plt.imshow(grid, cmap=cmap, norm=norm)
@@ -228,12 +272,20 @@ class ReplayBuffer:
 # 3. 辅助函数：将观测转换为网络输入的 state 向量
 def obs_to_state(obs, grid_size):
     """
-    扩展状态：在 13 维（4坐标+9邻居）的基础上，再加 1 维“归一化曼哈顿距离”。
+    扩展状态：在 14 维（4坐标+9邻居+1归一化曼哈顿距离）的基础上，
+    同时将障碍物也视作占据单元。
     最终 state 维度：14。
     """
     state_dict = {}
     H, W = grid_size
+    # occupancy 标记网格中哪些位置被“占据”——智能体或障碍物
     occupancy = np.zeros((H, W), dtype=np.float32)
+    # 先把障碍物设为占据
+    if 'obstacles' in next(iter(obs.values())):
+        for (ox, oy) in next(iter(obs.values()))['obstacles']:
+            occupancy[ox, oy] = 1.0
+
+    # 再把所有智能体设为占据
     for j in range(len(obs)):
         rx, ry = obs[j]['position']
         occupancy[rx, ry] = 1.0
@@ -359,12 +411,7 @@ class MADQNTrainer:
     def train(self, num_episodes=200, max_steps=50,
               eps_start=1.0, eps_end=0.05, eps_decay=0.995):
         """
-        多智能体 DQN 训练函数（修正版）。
-
-        主要改动点：
-          1. select_action 接受 done 参数；
-          2. 在 step 后检查 reward == +10 时标记 done_dict[i]=True；
-          3. push 时传入 done_dict[i]，让 Q 目标正确；
+        多智能体 DQN 训练函数（修正版）。主要改动点保持不变。
         """
         eps = eps_start
         episode_returns = []
@@ -440,9 +487,12 @@ class MADQNTrainer:
         plt.show()
 
 
+
+
 def plot_greedy_trajectories(trainer, env):
     """
-    可视化函数也不要写死 6x6 和 3，只要用 env.grid_size 和 env.num_agents 即可。
+    可视化函数：展示贪心策略下的多智能体轨迹，
+    障碍物绘制为填满整个格子，并在图例中说明起点、终点和障碍物的形状。
     """
     H, W = env.grid_size
     agent_trajectories = {i: [] for i in range(env.num_agents)}
@@ -476,57 +526,113 @@ def plot_greedy_trajectories(trainer, env):
         print(f"Agent {i}: {traj}")
 
     plt.figure(figsize=(6, 6))
-    # 画网格线
-    for x in range(H + 1):
-        plt.plot([0, W], [x, x], color='gray', linewidth=0.5)
-    for y in range(W + 1):
-        plt.plot([y, y], [0, H], color='gray', linewidth=0.5)
+    ax = plt.gca()
 
-    # 如果智能体数量未知，先准备一个颜色列表（可以用更多种颜色或循环使用）
+    # 1. 绘制网格线
+    for x in range(H + 1):
+        ax.plot([0, W], [x, x], color='gray', linewidth=0.5)
+    for y in range(W + 1):
+        ax.plot([y, y], [0, H], color='gray', linewidth=0.5)
+
+    # 2. 绘制障碍物（填满整个格子）
+    for (ox, oy) in env.obstacles:
+        # 注意：要将行列坐标转换为绘图坐标系：x 对应列索引，y 对应 H - 1 - 行索引
+        rect = Rectangle((oy, H - 1 - ox), 1, 1, facecolor='black', edgecolor='black')
+        ax.add_patch(rect)
+
+    # 3. 绘制每个智能体的轨迹、起点和终点
     base_colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k', '#FFA500']
     colors_list = [base_colors[i % len(base_colors)] for i in range(env.num_agents)]
 
     for i, traj in agent_trajectories.items():
+        # 轨迹线
         xs = [pos[1] + 0.5 for pos in traj]
         ys = [(H - 1 - pos[0]) + 0.5 for pos in traj]
-        plt.plot(xs, ys, marker='o', color=colors_list[i], label=f"Agent {i}")
+        ax.plot(xs, ys, marker='o', color=colors_list[i], label=f"Agent {i}")
 
+        # 起点：方形标记
         start = traj[0]
         sx, sy = start[1] + 0.5, (H - 1 - start[0]) + 0.5
-        plt.scatter([sx], [sy], color=colors_list[i], marker='s', s=80)
+        ax.scatter([sx], [sy],
+                   color=colors_list[i],
+                   marker='s',
+                   s=80)
 
+        # 终点：星形标记
         goal = env.destinations[i]
         gx, gy = goal[1] + 0.5, (H - 1 - goal[0]) + 0.5
-        plt.scatter([gx], [gy], color=colors_list[i], marker='*', s=120)
+        ax.scatter([gx], [gy],
+                   color=colors_list[i],
+                   marker='*',
+                   s=120)
 
-    plt.xlim(0, W)
-    plt.ylim(0, H)
-    plt.gca().set_aspect('equal')
-    plt.xticks([]); plt.yticks([])
-    plt.legend(bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=9)
-    plt.title("Multi-Agent Trajectories (Greedy Policy)")
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, H)
+    ax.set_aspect('equal')
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    # 4. 自定义图例（Legend）
+    legend_elements = [
+        # 障碍物：黑色实心方块
+        Rectangle((0, 0), 1, 1, facecolor='black', edgecolor='black', label='Obstacle'),
+        # 起点：灰色空心方块（示意所有智能体的起点形状）
+        Line2D([0], [0], marker='s', color='gray', label='Start',
+               markerfacecolor='none', linestyle='None', markersize=10),
+        # 终点：灰色空心星形（示意所有智能体的终点形状）
+        Line2D([0], [0], marker='*', color='gray', label='Goal',
+               markerfacecolor='none', linestyle='None', markersize=12)
+    ]
+    # 再添加每个 Agent 的轨迹图例
+    for i, color in enumerate(colors_list):
+        legend_elements.append(
+            Line2D([0], [0], color=color, lw=2, label=f'Agent {i}')
+        )
+
+    ax.legend(handles=legend_elements,
+              bbox_to_anchor=(1.01, 1),
+              loc='upper left',
+              fontsize=9)
+
+    plt.title("Multi-Agent Trajectories (Greedy Policy) with Obstacles")
     plt.tight_layout()
     plt.show()
 
 # ----------------------------------------
-# 第三部分：执行训练
+# 第三部分：执行训练（示例：定义一些固定障碍物）
 # ----------------------------------------
 if __name__ == "__main__":
-
+    # 在 8x8 网格中，定义几个固定障碍物坐标
+    fixed_obstacles = [
+        (1, 1),
+        (3, 0),
+        (2, 2),
+        (2, 3),
+        (2, 4),
+        (3, 2),
+        (5, 5),
+        (6, 2),
+    ]
 
     # 1. 用前面定义的变量来创建环境和 Trainer
+    env = TrafficRoutingEnv(
+        grid_size=(GRID_ROWS, GRID_COLS),
+        num_agents=NUM_AGENTS,
+        obstacles=fixed_obstacles
+    )
 
-    env = TrafficRoutingEnv(grid_size=(GRID_ROWS, GRID_COLS),
-                            num_agents=NUM_AGENTS)
-    state_dim = 14   # 因为我们用 4+9 的状态向量
+    state_dim = 14   # 因为我们用 4+9+1 的状态向量
     action_dim = 5   # 上、下、左、右、停留
 
-    trainer = MADQNTrainer(env=env,
-                           num_agents=NUM_AGENTS,
-                           state_dim=state_dim,
-                           action_dim=action_dim)
+    trainer = MADQNTrainer(
+        env=env,
+        num_agents=NUM_AGENTS,
+        state_dim=state_dim,
+        action_dim=action_dim
+    )
 
-    episode_returns = trainer.train(num_episodes=NUM_EPISODES)
+    # 进行训练
+    trainer.train(num_episodes=NUM_EPISODES)
 
-    # 3. 训练结束后可视化
+    # 训练结束后可视化（贪心策略）
     plot_greedy_trajectories(trainer, env)

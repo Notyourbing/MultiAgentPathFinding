@@ -1,3 +1,16 @@
+# 环境
+
+python 3.9
+
+windows 10
+
+# 架构
+
+- `BaselineAstar.py` 是基准算法
+- `DNQ.py`是无障碍物路径规划强化学习算法
+- `DNQObstacle.py`加入了障碍物
+- `DoubleDNQ.py` 在有障碍物的基础上对DNQ进行了改进，引入Double DNQ减少计算目标Q值的过估计，引入Dueling DQN改进网络结构。
+- 上述文件可分别直接运行。
 
 # 项目目标
 
