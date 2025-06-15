@@ -185,70 +185,170 @@ windows 10
 
 ---
 
-## 可视化模块：`plot_greedy_trajectories(trainer, env)`
+## 可视化模块：`animate(trainer, env)`
 
 * **核心职责**
 
-  * 在训练结束后，用 “ε = 0（纯贪心）” 策略演示一次完整回合，收集每个智能体的位置轨迹，并绘制到同一个网格图上。
+  * 在训练结束后，用 “ε = 0（纯贪心）” 策略演示一次完整回合，收集每个智能体的位置轨迹，并绘制实时动画到同一个网格图上。
   * 目的是直观地展示：训练好的策略在给定初始状态下，三个以上智能体如何规划不碰撞的路径，并到达各自的目标。
 
 * **主要流程**
 
   ```python
-  H, W = env.grid_size
-  agent_trajectories = {i: [] for i in 0..num_agents-1}
-  done_dict = {i: False for i in 0..num_agents-1}
+    H, W = env.grid_size
+    agent_trajectories = {i: [] for i in range(env.num_agents)}
+    done_dict = {i: False for i in range(env.num_agents)}
 
-  # 1) 把环境复位到初始状态
-  obs = env.reset()
-  state_dict = obs_to_state(obs, env.grid_size)
-  for i in 0..num_agents-1:
-      agent_trajectories[i].append(env.agent_positions[i])
+    # 重置环境并记录初始位置
+    obs = env.reset()
+    state_dict = obs_to_state(obs, env.grid_size)
+    for i in range(env.num_agents):
+        agent_trajectories[i].append(env.agent_positions[i])
 
-  done = False
-  step = 0
-  while not done and step < 50:
-      # 2) ε=0 纯贪心选动作
-      actions = { i: trainer.select_action(i, state_dict[i], eps=0.0, done=done_dict[i])
-                  for i in 0..num_agents-1 }
-      next_obs, rewards, done, _ = env.step(actions)
-      next_state_dict = obs_to_state(next_obs, env.grid_size)
+    # 收集所有步骤的数据用于动画
+    all_steps = []
+    step = 0
+    done = False
+    
+    while not done and step < 50:
+        actions = {
+            i: trainer.select_action(i, state_dict[i], eps=0.0, done=done_dict[i])
+            for i in range(env.num_agents)
+        }
+        next_obs, rewards, done, _, num_collisions = env.step(actions)
+        next_state_dict = obs_to_state(next_obs, env.grid_size)
+        
+        for i in range(env.num_agents):
+            if rewards[i] == 10 or env.agent_positions[i] == env.destinations[i]:
+                done_dict[i] = True
+            agent_trajectories[i].append(env.agent_positions[i])
+        
+        # 记录当前步骤的所有智能体位置
+        all_steps.append({i: env.agent_positions[i] for i in range(env.num_agents)})
+        state_dict = next_state_dict
+        step += 1
 
-      # 3) 记录新位置并更新 done_dict
-      for i in 0..num_agents-1:
-          if rewards[i] == 10 or env.agent_positions[i] == env.destinations[i]:
-              done_dict[i] = True
-          agent_trajectories[i].append(env.agent_positions[i])
+    print("Final Greedy Trajectories (row, col) for each agent:")
+    for i, traj in agent_trajectories.items():
+        print(f"Agent {i}: {traj}")
 
-      state_dict = next_state_dict
-      step += 1
+    # 创建图形
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    # 1. 绘制网格线
+    for x in range(H + 1):
+        ax.plot([0, W], [x, x], color='gray', linewidth=0.5)
+    for y in range(W + 1):
+        ax.plot([y, y], [0, H], color='gray', linewidth=0.5)
 
-  # 4) 控制台打印每个智能体的轨迹列表
-  for i, traj in agent_trajectories.items():
-      print(f"Agent {i}: {traj}")
+    # 2. 绘制障碍物（填满整个格子）
+    for (ox, oy) in env.obstacles:
+        rect = Rectangle((oy, H - 1 - ox), 1, 1, facecolor='black', edgecolor='black')
+        ax.add_patch(rect)
 
-  # 5) 绘制网格 + 各 agent 轨迹 + 起点/终点标记
-  plt.figure(figsize=(6, 6))
-  for x in 0..H:
-      plt.plot([0, W], [x, x], color='gray', linewidth=0.5)
-  for y in 0..W:
-      plt.plot([y, y], [0, H], color='gray', linewidth=0.5)
+    # 3. 绘制每个智能体的起点和终点
+    base_colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k', '#FFA500']
+    colors_list = [base_colors[i % len(base_colors)] for i in range(env.num_agents)]
+    
+    # 绘制目的地（终点）
+    destinations = {}
+    for i in range(env.num_agents):
+        goal = env.destinations[i]
+        gx, gy = goal[1] + 0.5, (H - 1 - goal[0]) + 0.5
+        destinations[i] = ax.scatter([gx], [gy],
+                                   color=colors_list[i],
+                                   marker='*',
+                                   s=120,
+                                   zorder=3)
 
-  base_colors = ['r','g','b','c','m','y','k','#FFA500']
-  colors_list = [ base_colors[i % len(base_colors)] for i in range(num_agents) ]
-  for i, traj in agent_trajectories.items():
-      xs = [pos[1] + 0.5 for pos in traj]
-      ys = [(H-1 - pos[0]) + 0.5 for pos in traj]
-      plt.plot(xs, ys, marker='o', color=colors_list[i], label=f"Agent {i}")
-      # 起点方形、终点星形标记省略…
+    # 初始化智能体位置标记
+    agents = {}
+    for i in range(env.num_agents):
+        start = agent_trajectories[i][0]
+        sx, sy = start[1] + 0.5, (H - 1 - start[0]) + 0.5
+        agents[i] = ax.scatter([sx], [sy],
+                             color=colors_list[i],
+                             marker='s',
+                             s=80,
+                             zorder=3)
 
-  plt.xlim(0, W); plt.ylim(0, H)
-  plt.gca().set_aspect('equal')
-  plt.xticks([]); plt.yticks([])
-  plt.legend(...)
-  plt.title("Multi-Agent Trajectories (Greedy Policy)")
-  plt.tight_layout()
-  plt.show()
+    # 初始化轨迹线
+    lines = {}
+    for i in range(env.num_agents):
+        lines[i], = ax.plot([], [], 
+                           color=colors_list[i],
+                           marker='o',
+                           markersize=6,
+                           linewidth=2,
+                           zorder=2)
+
+    # 设置坐标轴
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, H)
+    ax.set_aspect('equal')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title("Multi-Agent Trajectories Animation (Greedy Policy)")
+
+    # 添加步骤计数器文本
+    step_text = ax.text(W/2, H+0.5, "Step: 0", ha='center', va='center', fontsize=12)
+
+    # 自定义图例
+    legend_elements = [
+        Rectangle((0, 0), 1, 1, facecolor='black', edgecolor='black', label='Obstacle'),
+        Line2D([0], [0], marker='s', color='gray', label='Start',
+               markerfacecolor='none', linestyle='None', markersize=10),
+        Line2D([0], [0], marker='*', color='gray', label='Goal',
+               markerfacecolor='none', linestyle='None', markersize=12)
+    ]
+    for i, color in enumerate(colors_list):
+        legend_elements.append(Line2D([0], [0], color=color, lw=2, label=f'Agent {i}'))
+    
+    ax.legend(handles=legend_elements,
+             bbox_to_anchor=(1.01, 1),
+             loc='upper left',
+             fontsize=9)
+
+    # 动画更新函数
+    def update(frame):
+        nonlocal step_text
+        
+        # 更新步骤文本
+        step_text.set_text(f"Step: {frame+1}")
+        
+        # 更新每个智能体的位置和轨迹
+        for i in range(env.num_agents):
+            # 只更新到当前帧的位置
+            current_traj = agent_trajectories[i][:frame+2]  # +2因为初始位置在0帧
+            
+            # 更新智能体位置
+            if frame < len(all_steps):
+                x, y = all_steps[frame][i]
+                agents[i].set_offsets([y + 0.5, (H - 1 - x) + 0.5])
+            
+            # 更新轨迹线
+            xs = [pos[1] + 0.5 for pos in current_traj]
+            ys = [(H - 1 - pos[0]) + 0.5 for pos in current_traj]
+            lines[i].set_data(xs, ys)
+        
+        return list(agents.values()) + list(lines.values()) + [step_text]
+
+    # 创建动画
+    ani = FuncAnimation(
+        fig, 
+        update, 
+        frames=len(all_steps),  # 使用实际步骤数作为帧数
+        interval=500,  # 每500毫秒更新一帧
+        blit=True,
+        repeat=False
+    )
+
+    plt.tight_layout()
+    plt.show()
+    
+    # 保存为GIF
+    ani.save('animate_results/greedy_trajectories_DQNObstacle.gif', writer='pillow', fps=2, dpi=100)
+    return ani
   ```
 
 * **要点**
@@ -285,12 +385,12 @@ windows 10
 3. **可视化阶段**
 
    ```python
-   plot_greedy_trajectories(trainer, env)
+   animate(trainer, env)
    ```
 
    * `env.reset()`（把 agent 再次恢复到最初起点）
    * 用“纯贪心”动作（ε=0）让模型演示一次完整回合，收集位置并绘图。
-   * 最后在图上看到 N 条彩色折线，直观展示训练后智能体的行走轨迹和避让策略。
+   * 最后在看到 N 条彩色折线代表智能体运动的动画，直观展示训练后智能体的行走轨迹和避让策略。
 
 ---
 
@@ -308,6 +408,6 @@ windows 10
 * **可视化架构**：
 
   1. 训练结束后，用 ε=0（纯贪心）策略演示一次完整回合。
-  2. 收集并打印每个 agent 的位置序列，然后在网格上绘制它们的移动轨迹、起点和终点标记。
+  2. 收集并打印每个 agent 的位置序列，然后在网格上绘制它们的移动动画、起点和终点标记。
 
-通过上述模块化设计，实现了一个相对完整的“多智能体网格路径规划 + DQN 训练 + 轨迹可视化”流水线。
+通过上述模块化设计，实现了一个相对完整的“多智能体网格路径规划 + DQN 训练 + 运动可视化”流水线。
